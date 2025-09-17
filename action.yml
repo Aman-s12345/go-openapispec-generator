@@ -1,0 +1,405 @@
+name: 'Go OpenAPI Generator'
+description: 'Generate OpenAPI documentation from Go code'
+author: 'Adloid Technologies'
+
+inputs:
+  project-path:
+    description: 'Path to the Go project'
+    required: false
+    default: '.'
+  output-path:
+    description: 'Output path for OpenAPI spec'
+    required: false
+    default: './docs/openapi.yaml'
+  format:
+    description: 'Output format (yaml or json)'
+    required: false
+    default: 'yaml'
+  title:
+    description: 'API documentation title'
+    required: false
+    default: 'API Documentation'
+  version:
+    description: 'API version'
+    required: false
+    default: '1.0.0'
+  description:
+    description: 'API description'
+    required: false
+    default: 'API Documentation'
+  server-url:
+    description: 'Server URL for API'
+    required: false
+    default: 'https://api.example.com'
+  
+  # Build control
+  build-html:
+    description: 'Whether to build HTML documentation'
+    required: false
+    default: 'true'
+  html-output-path:
+    description: 'Output path for HTML documentation'
+    required: false
+    default: './docs/index.html'
+  
+  # Upload control
+  upload-artifact:
+    description: 'Whether to upload as GitHub artifact'
+    required: false
+    default: 'false'
+  artifact-name:
+    description: 'Name for the uploaded artifact'
+    required: false
+    default: 'api-documentation'
+  artifact-retention-days:
+    description: 'Retention days for artifact'
+    required: false
+    default: '30'
+  
+  # GCS upload control
+  upload-gcs:
+    description: 'Whether to upload to GCS'
+    required: false
+    default: 'false'
+  gcs-credentials:
+    description: 'GCS service account credentials JSON'
+    required: false
+  gcs-bucket-name:
+    description: 'GCS bucket name'
+    required: false
+  gcs-bucket-path:
+    description: 'GCS bucket path'
+    required: false
+  gcs-environment:
+    description: 'Environment for GCS upload (prod/dev/test)'
+    required: false
+    default: 'test'
+  
+  # Executable download control
+  executable-gcs-bucket:
+    description: 'GCS bucket containing the pre-built executable'
+    required: false
+    default: ''
+  executable-gcs-path:
+    description: 'GCS path to the executable'
+    required: false
+    default: 'source-code/go-openapi-generator/latest/openapi-generator-linux-amd64'
+
+outputs:
+  openapi-spec-path:
+    description: 'Path to generated OpenAPI specification'
+    value: ${{ steps.generate.outputs.spec-path }}
+  html-doc-path:
+    description: 'Path to generated HTML documentation'
+    value: ${{ steps.build-html.outputs.html-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Node.js for Redocly
+      if: inputs.build-html == 'true'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Install Redocly CLI
+      if: inputs.build-html == 'true'
+      shell: bash
+      run: npm install -g @redocly/cli
+
+    - name: Authenticate to Google Cloud for Executable Download
+      uses: 'google-github-actions/auth@v2'
+      with:
+        credentials_json: ${{ inputs.gcs-credentials }}
+
+    - name: Set up Cloud SDK
+      uses: 'google-github-actions/setup-gcloud@v2'
+
+    - name: Download Pre-built Executable
+      shell: bash
+      run: |
+        echo "Downloading pre-built OpenAPI generator..."
+        
+        # Determine the bucket name
+        if [ -z "${{ inputs.executable-gcs-bucket }}" ]; then
+          BUCKET_NAME="${{ inputs.gcs-bucket-name }}"
+        else
+          BUCKET_NAME="${{ inputs.executable-gcs-bucket }}"
+        fi
+        
+        # Get the directory path from the executable path
+        EXECUTABLE_PATH="${{ inputs.executable-gcs-path }}"
+        EXECUTABLE_DIR=$(dirname "$EXECUTABLE_PATH")
+        
+        # Download the executable
+        gsutil cp gs://${BUCKET_NAME}/${{ inputs.executable-gcs-path }} \
+          ${{ github.action_path }}/openapi-generator
+        
+        # Make it executable
+        chmod +x ${{ github.action_path }}/openapi-generator
+        
+        # Verify the download
+        if [ ! -f "${{ github.action_path }}/openapi-generator" ]; then
+          echo "❌ Failed to download executable"
+          exit 1
+        fi
+        
+        echo "✅ Executable downloaded successfully"
+        ls -la ${{ github.action_path }}/openapi-generator
+        
+        # Optionally download and display metadata
+        if gsutil -q stat gs://${BUCKET_NAME}/${EXECUTABLE_DIR}/metadata.json; then
+          echo ""
+          echo "📋 Build metadata:"
+          gsutil cat gs://${BUCKET_NAME}/${EXECUTABLE_DIR}/metadata.json | jq '.' || true
+        fi
+
+    - name: Create output directory
+      shell: bash
+      run: |
+        mkdir -p $(dirname ${{ inputs.output-path }})
+        mkdir -p $(dirname ${{ inputs.html-output-path }})
+
+    - name: Generate OpenAPI Specification
+      id: generate
+      shell: bash
+      run: |
+        echo "Generating OpenAPI specification..."
+        ${{ github.action_path }}/openapi-generator \
+          -project "${{ inputs.project-path }}" \
+          -output "${{ inputs.output-path }}" \
+          -format "${{ inputs.format }}" \
+          -title "${{ inputs.title }}" \
+          -version "${{ inputs.version }}" \
+          -description "${{ inputs.description }}" \
+          -server "${{ inputs.server-url }}"
+        
+        echo "spec-path=${{ inputs.output-path }}" >> $GITHUB_OUTPUT
+
+    - name: Create Redocly Configuration
+      if: inputs.build-html == 'true'
+      shell: bash
+      run: |
+        cat > redocly.yaml << 'EOF'
+        extends:
+          - recommended
+
+        apis:
+          api@v1:
+            root: ${{ inputs.output-path }}
+
+        theme:
+          openapi:
+            theme:
+              colors:
+                primary:
+                  main: '#2563eb'
+                  contrastText: '#ffffff'
+                success:
+                  main: '#10b981'
+                warning:
+                  main: '#f59e0b'
+                error:
+                  main: '#ef4444'
+                text:
+                  primary: '#111827'
+                  secondary: '#6b7280'
+                http:
+                  get: '#10b981'
+                  post: '#3b82f6'
+                  put: '#f59e0b'
+                  delete: '#ef4444'
+                  patch: '#8b5cf6'
+                  head: '#6b7280'
+                  options: '#6b7280'
+              
+              typography:
+                fontSize: '14px'
+                lineHeight: 1.6
+                fontFamily: '"Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+                code:
+                  fontSize: '13px'
+                  fontFamily: '"Fira Code", "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace'
+              
+              sidebar:
+                backgroundColor: '#f8fafc'
+                textColor: '#374151'
+                activeTextColor: '#1f2937'
+                activeBgColor: '#e0e7ff'
+                groupItems:
+                  textTransform: 'uppercase'
+                  fontWeight: '600'
+                  fontSize: '11px'
+                  letterSpacing: '0.05em'
+              
+              rightPanel:
+                backgroundColor: '#1e293b'
+                textColor: '#e2e8f0'
+
+            hideDownloadButton: false
+            hideHostname: false
+            hideLoading: false
+            hideSingleRequestSampleTab: false
+            hideRequestPayloadSample: false
+            hideResponsePayloadSample: false
+            expandDefaultServerVariables: true
+            expandResponses: '200,201,204'
+            expandSingleSchemaField: true
+            jsonSampleExpandLevel: 3
+            hideSchemaTitles: false
+            sortPropsAlphabetically: false
+            requiredPropsFirst: true
+            
+            search: true
+            searchMaxDepth: 10
+            
+            menuToggle: true
+            scrollYOffset: 0
+            pathInMiddlePanel: false
+            suppressWarnings: false
+            
+            tryItOutEnabled: true
+            
+            schemaExpansionLevel: 2
+            generateCodeSamples:
+              languages:
+                - lang: javascript
+                  label: JavaScript
+                - lang: python
+                  label: Python
+                - lang: go
+                  label: Go
+                - lang: java
+                  label: Java
+                - lang: php
+                  label: PHP
+            
+            showConsole: true
+            mockServer: false
+            disableSearch: false
+            
+            showCodeSamplesCopyButton: true
+            
+            showObjectSchemaExamples: true
+            showExtensions: false
+            showCommonMark: true
+            
+            showSecurityDefinitions: true
+        EOF
+
+    - name: Generate HTML Documentation
+      id: build-html
+      if: inputs.build-html == 'true'
+      shell: bash
+      run: |
+        echo "Generating HTML documentation..."
+        redocly build-docs ${{ inputs.output-path }} \
+          --output ${{ inputs.html-output-path }} \
+          --title "${{ inputs.title }}" \
+          --config redocly.yaml
+        
+        echo "html-path=${{ inputs.html-output-path }}" >> $GITHUB_OUTPUT
+
+    - name: Create documentation summary
+      shell: bash
+      run: |
+        cat > $(dirname ${{ inputs.output-path }})/README.md << EOF
+        # ${{ inputs.title }}
+        
+        ## Files in this package:
+        - \`$(basename ${{ inputs.html-output-path }})\` - Interactive API documentation 
+        - \`$(basename ${{ inputs.output-path }})\` - OpenAPI 3.0 specification file
+        
+        Generated at: $(date)
+        Commit: ${{ github.sha }}
+        Branch: ${{ github.ref_name }}
+        Event: ${{ github.event_name }}
+        EOF
+
+    - name: Upload Documentation Artifacts
+      if: inputs.upload-artifact == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}-${{ github.run_id }}
+        path: |
+          ${{ inputs.output-path }}
+          ${{ inputs.html-output-path }}
+          $(dirname ${{ inputs.output-path }})/README.md
+        retention-days: ${{ inputs.artifact-retention-days }}
+
+    - name: Upload to GCS Bucket
+      if: inputs.upload-gcs == 'true'
+      shell: bash
+      run: |
+        echo "Uploading documentation to GCS bucket..."
+        
+        # Upload files to GCS bucket
+        gsutil -m cp -r $(dirname ${{ inputs.output-path }})/* \
+          gs://${{ inputs.gcs-bucket-name }}/${{ inputs.gcs-bucket-path }}/${{ inputs.gcs-environment }}/
+        
+        # Set proper cache headers for HTML
+        gsutil -m setmeta -h "Cache-Control:no-cache, max-age=0" \
+          gs://${{ inputs.gcs-bucket-name }}/${{ inputs.gcs-bucket-path }}/${{ inputs.gcs-environment }}/$(basename ${{ inputs.html-output-path }})
+        
+        # Set proper content types
+        gsutil -m setmeta -h "Content-Type:text/html" \
+          gs://${{ inputs.gcs-bucket-name }}/${{ inputs.gcs-bucket-path }}/${{ inputs.gcs-environment }}/$(basename ${{ inputs.html-output-path }})
+        
+        gsutil -m setmeta -h "Content-Type:application/x-yaml" \
+          gs://${{ inputs.gcs-bucket-name }}/${{ inputs.gcs-bucket-path }}/${{ inputs.gcs-environment }}/$(basename ${{ inputs.output-path }})
+        
+        echo "Documentation uploaded to: gs://${{ inputs.gcs-bucket-name }}/${{ inputs.gcs-bucket-path }}/${{ inputs.gcs-environment }}/"
+
+    - name: Verify GCS Upload
+      if: inputs.upload-gcs == 'true'
+      shell: bash
+      run: |
+        echo "Verifying uploaded files..."
+        gsutil ls -l gs://${{ inputs.gcs-bucket-name }}/${{ inputs.gcs-bucket-path }}/${{ inputs.gcs-environment }}/
+        
+        echo ""
+        echo "✅ Documentation successfully uploaded to private bucket"
+        echo " Location: gs://${{ inputs.gcs-bucket-name }}/${{ inputs.gcs-bucket-path }}/${{ inputs.gcs-environment }}/"
+
+    - name: Clean up downloaded executable
+      if: always()
+      shell: bash
+      run: |
+        # Clean up the downloaded executable
+        rm -f ${{ github.action_path }}/openapi-generator || true
+
+    - name: Create Action Summary
+      shell: bash
+      run: |
+        echo "## 📚 API Documentation Generated Successfully!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ OpenAPI specification created at: \`${{ inputs.output-path }}\`" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ inputs.build-html }}" == "true" ]; then
+          echo "✅ Interactive HTML documentation built" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ "${{ inputs.upload-artifact }}" == "true" ]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Download Documentation" >> $GITHUB_STEP_SUMMARY
+          echo "1. Go to the **Actions** tab" >> $GITHUB_STEP_SUMMARY
+          echo "2. Click on this workflow run" >> $GITHUB_STEP_SUMMARY
+          echo "3. Download the **${{ inputs.artifact-name }}-${{ github.run_id }}** artifact" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ "${{ inputs.upload-gcs }}" == "true" ]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.gcs-environment }}" == "prod" ]; then
+            echo "✅ Documentation deployed to **PRODUCTION** environment" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ inputs.gcs-environment }}" == "dev" ]; then
+            echo "✅ Documentation deployed to **DEVELOPMENT** environment" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ Documentation deployed to **TEST** environment" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo " Bucket Path: \`${{ inputs.gcs-bucket-path }}/${{ inputs.gcs-environment }}/\`" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Commit**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Branch**: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Event**: \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
