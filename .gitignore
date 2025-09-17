@@ -1,0 +1,8 @@
+.vscode
+
+.DS_Store
+go-openapi-generator
+go-openapi-generator.exe
+vsa-debug.yaml
+vsa-api-server-doc.yml
+.env
