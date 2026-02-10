@@ -1,6 +1,6 @@
 name: 'Go OpenAPI Generator'
 description: 'Generate OpenAPI documentation from Go code'
-author: 'Adloid Technologies'
+author: 'Aman Singh'
 
 inputs:
   project-path:
